@@ -5,10 +5,28 @@ import pandas as pd
 import io
 import re
 
+LINKEDIN_REGIONS_URL = "https://api.linkedin.com/v2/regions?q=countries"
 HUNTER_API_URL = "https://api.hunter.io/v2/email-finder"
 
-# Helper Functions
+def fetch_country_urns(countries):
+    """Fetch LinkedIn country URNs based on the given country names."""
+    headers = {"Authorization": f"Bearer {st.secrets['LINKEDIN_API_TOKEN']}"}
+    urns = []
+
+    for country in countries:
+        response = requests.get(
+            f"{LINKEDIN_REGIONS_URL}&countries={country}", headers=headers
+        )
+        if response.status_code == 200:
+            data = response.json().get("elements", [])
+            if data:
+                urn = data[0].get("id")
+                urns.append(urn)
+
+    return urns
+
 def search_email_with_hunter(api_key, domain, first_name, last_name):
+    """Search email using Hunter.io API."""
     params = {
         "api_key": api_key,
         "domain": domain,
@@ -22,15 +40,14 @@ def search_email_with_hunter(api_key, domain, first_name, last_name):
     return None, None
 
 def infer_domain(company_name):
-    """Generate possible domain patterns from a company name."""
+    """Generate possible domains including Gmail."""
     clean_name = re.sub(r"[^a-zA-Z0-9]", "", company_name).lower()
-    possible_domains = [
-        f"{clean_name}.com",f"{clean_name}.org",
-        f"{clean_name}.edu", f"{clean_name}.net", f"{clean_name}.co"
-    ]
-    return possible_domains
+    return [
+        f"{clean_name}{ext}" for ext in [".com", ".ca", ".org", ".edu", ".net", ".co"]
+    ] + ["gmail.com"]  # Add Gmail as a fallback domain
 
 def get_profile_details(api, urn_id):
+    """Fetch and parse LinkedIn profile details."""
     profile = api.get_profile(urn_id=urn_id)
     return {
         "name": f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip(),
@@ -41,17 +58,15 @@ def get_profile_details(api, urn_id):
     }
 
 def export_data_to_csv(profiles):
-    """Convert profile data to CSV using BytesIO."""
+    """Convert profile data to CSV."""
     csv_buffer = io.BytesIO()
     df = pd.DataFrame(profiles)
     df.to_csv(csv_buffer, index=False, encoding='utf-8')
     csv_buffer.seek(0)
     return csv_buffer
 
-# Initialize results variable to avoid scope errors
 results = []
 
-# Tabs Setup
 tab1, tab2, tab3 = st.tabs(["How to Use", "Find People", "Search Results"])
 
 with tab1:
@@ -59,9 +74,8 @@ with tab1:
     st.markdown("""
     - Use the **Find People** tab to search for LinkedIn profiles.
     - Enter the **Hunter API Key** to enable email search.
-    - Check the **Search Results** tab for profiles.
-    - If no email is found, use the **Search with Hunter** option.
-    - Use the **Export All Data** button to download all profiles as a CSV.
+    - If location filtering is needed, provide country names.
+    - Use the **Export All Data** button to download profiles as a CSV.
     """)
 
 with tab2:
@@ -72,19 +86,14 @@ with tab2:
     hunter_api_key = st.text_input("Hunter API Key", type="password")
     keywords = st.text_input("Keywords (e.g., Software Engineer)")
 
-    # Multi-select for Network Depth
     network_depth_options = st.multiselect(
         "Network Depth (Optional, select one or more)",
-        ["1st", "2nd", "3+"],
-        default=[]
+        ["1st", "2nd", "3+"], default=[]
     )
-    
-    # Map the user-friendly network depth to LinkedIn API values
     network_depth_map = {"1st": "F", "2nd": "S", "3+": "O"}
-    selected_network_depths = [
-        network_depth_map[depth] for depth in network_depth_options
-    ] if network_depth_options else None  # Optional field
+    selected_network_depths = [network_depth_map[d] for d in network_depth_options] if network_depth_options else None
 
+    countries = st.text_input("Countries (Optional, comma-separated)").split(",")
     limit = st.slider("Number of Results", 1, 200, 10)
 
     if st.button("Search"):
@@ -94,6 +103,10 @@ with tab2:
 
             if selected_network_depths:
                 search_params["network_depths"] = selected_network_depths
+            if countries:
+                urns = fetch_country_urns([c.strip() for c in countries])
+                if urns:
+                    search_params["regions"] = urns
 
             results = api.search_people(**search_params)
             st.success("Search complete! Check the Search Results tab.")
@@ -116,12 +129,11 @@ with tab3:
             else:
                 profiles_without_email.append(profile)
 
-        # Display Profiles with Email
         st.subheader("Profiles with Email")
         for profile in profiles_with_email:
             with st.container():
                 st.markdown(f"""
-                <div style="border:1px solid #ccc; padding:10px; margin-bottom:10px; border-radius:8px; background-color:#f9f9f9;">
+                <div style="border:1px solid #ccc; padding:10px; border-radius:8px;">
                     <strong>Name:</strong> {profile['name']}<br>
                     <strong>Role:</strong> {profile['headline']}<br>
                     <strong>Location:</strong> {profile['location']}<br>
@@ -130,14 +142,13 @@ with tab3:
                 </div>
                 """, unsafe_allow_html=True)
 
-        # Display Profiles without Email with Hunter Option
         st.subheader("Profiles without Email")
         for profile in profiles_without_email:
             col1, col2 = st.columns([3, 1])
 
             with col1:
                 st.markdown(f"""
-                <div style="border:1px solid #ccc; padding:10px; margin-bottom:10px; border-radius:8px;">
+                <div style="border:1px solid #ccc; padding:10px; border-radius:8px;">
                     <strong>Name:</strong> {profile['name']}<br>
                     <strong>Role:</strong> {profile['headline']}<br>
                     <strong>Location:</strong> {profile['location']}<br>
@@ -162,10 +173,8 @@ with tab3:
                         if not email_found:
                             st.warning("No email found via Hunter.")
 
-        # Export All Data to CSV
         if profiles_with_email or profiles_without_email:
-            all_profiles = profiles_with_email + profiles_without_email
-            csv_buffer = export_data_to_csv(all_profiles)
+            csv_buffer = export_data_to_csv(profiles_with_email + profiles_without_email)
             st.download_button(
                 label="Export All Data to CSV",
                 data=csv_buffer,
